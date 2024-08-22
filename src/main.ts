@@ -14,7 +14,7 @@
 
 import "./style.css";
 
-import { fromEvent, interval, merge, of, mergeMap, delay, Observable, from, tap } from "rxjs";
+import { fromEvent, interval, merge, of, mergeMap, delay, Observable, from, tap, takeUntil } from "rxjs";
 import { map, filter, scan } from "rxjs/operators";
 import * as Tone from "tone";
 import { SampleLibrary } from "./tonejs-instruments";
@@ -308,35 +308,42 @@ function playNotes(allNotes$: Observable<NoteData>, samples: { [key: string]: To
         const {column, color} = assign_column(note.pitch);
 
         const startTime = Tone.now() + 1
+
         if (note.user_played === "True") {
-            // ユーザーが再生する音符の場合の処理をここに追加できます
             const circle = createSvgElement(svg.namespaceURI, "circle", {
                 r: `${Note.RADIUS}`,
                 cx: `${20 + column * 20}%`,
                 cy: `${Note.RADIUS}`,
                 style: `fill: ${color}`,
                 class: "shadow",
-            }) as SVGGraphicsElement;;
-    
+            }) as SVGGraphicsElement;
+
             svg.appendChild(circle);
             activeCircles.add(circle);
 
-    
-            // CSS アニメーションを使用して円を移動させる
-            const animation = circle.animate([
-                { transform: `translateY(${Note.RADIUS}px)` },
-                { transform: `translateY(${Viewport.CANVAS_HEIGHT - Note.RADIUS}px)` }
-            ], {
-                duration: (duration + 1.5) * 1000, // 秒をミリ秒に変換
-                fill: "forwards",
-                easing: "linear",
-            });
-    
-            // アニメーション終了後に要素を削除
-            animation.finished.then(() => {
-                circle.remove();
-                activeCircles.delete(circle);
-                console.log(`Removed circle with pitch ${note.pitch}`);
+            const intervalTime = 5;
+            const times = (duration + 1.5) * 1000 / intervalTime;
+
+            const move$ = interval(intervalTime).pipe(
+                takeUntil(interval(intervalTime).pipe(filter(value => value >= times - 1))),
+                scan((progress) => progress + 1 / times, 0),
+                map((progress) => progress * (Viewport.CANVAS_HEIGHT - 2 * Note.RADIUS))
+            );
+
+            move$.subscribe({
+                next: (newY) => {
+                    circle.setAttribute("cy", String(Note.RADIUS + newY));
+
+                    // ノートが画面の下部に達した場合に削除
+                    if (parseFloat(circle.getAttribute("cy")!) >= Viewport.CANVAS_HEIGHT - Note.RADIUS - 100) {
+                        circle.remove();
+                        activeCircles.delete(circle);
+                        console.log(`Removed circle with pitch ${note.pitch}`);
+                    }
+                },
+                complete: () => {
+                    // 必要に応じて追加のクリーンアップ
+                }
             });
         }
 
