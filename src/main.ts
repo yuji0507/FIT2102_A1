@@ -14,7 +14,7 @@
 
 import "./style.css";
 
-import { fromEvent, interval, merge, of, mergeMap, delay, Observable } from "rxjs";
+import { fromEvent, interval, merge, of, mergeMap, delay, Observable, from, tap } from "rxjs";
 import { map, filter, scan } from "rxjs/operators";
 import * as Tone from "tone";
 import { SampleLibrary } from "./tonejs-instruments";
@@ -198,10 +198,12 @@ export function main(csvContents: string, samples: { [key: string]: Tone.Sampler
             }
         });
     
-    // Parse CSV and get observables
-    parseCsvToObservables(csvContents).subscribe(notes => {
-        playNotes(notes, samples);
-    });
+    const notes$: Observable<NoteData> = parseCsvToObservables(csvContents).pipe(
+        mergeMap(notesArray => from(notesArray)) // 配列をフラット化して Observable<NoteData> に変換
+    );
+
+    playNotes(notes$, samples, svg, initialState);
+
 }
 
 // The following simply runs your main function on window load.  Make sure to leave it in place.
@@ -254,7 +256,7 @@ if (typeof window !== "undefined") {
 
 
 interface NoteData {
-    user_played: boolean;
+    user_played: string;
     instrument_name: string;
     velocity: number;
     pitch: number;
@@ -275,7 +277,7 @@ const parseCsvToObservables = (csvContents: string): Observable<NoteData[]> => {
 
         const notes: NoteData[] = dataRows.map(row => {
             return {
-                user_played: Boolean(row[0]),
+                user_played: String(row[0]),
                 instrument_name: row[1],
                 velocity: Number(row[2]),
                 pitch: Number(row[3]),
@@ -289,115 +291,119 @@ const parseCsvToObservables = (csvContents: string): Observable<NoteData[]> => {
     });
 };
 
+function playNotes(allNotes$: Observable<NoteData>, samples: { [key: string]: Tone.Sampler }, svg: SVGGraphicsElement, s: State) {
 
-/**
- * Plays notes based on the parsed CSV data.
- *
- * @param notes Array of note data objects
- * @param samples Object mapping instrument names to Tone.Sampler instances
- */
-const playNotes = (notes: NoteData[], samples: { [key: string]: Tone.Sampler }) => {
-    notes.forEach(note => {
-        if (note.user_played) {
-            const sampler = samples[note.instrument_name];
-            if (sampler) {
-                // Schedule note playback
-                Tone.Transport.schedule(time => {
-                    sampler.triggerAttackRelease(Tone.Frequency(note.pitch, "midi").toNote(), '8n', time, note.velocity / 127);
-                }, note.start);
-            }
-        }
-    });
+    const activeCircles = new Set<SVGGraphicsElement>();
 
-    // Start the Tone.js Transport to play scheduled notes
-    Tone.Transport.start();
-};
+    allNotes$.pipe(
+        mergeMap(note =>
+            note.user_played ? of(note).pipe(delay(note.start * 1000)) : of(null)),
+            filter(note => note !== null)
+    )
+    .subscribe(note => {
+        const instrument = samples[note.instrument_name];
+        const frequency = Tone.Frequency(note.pitch, "midi").toFrequency();
+        const duration = (note.end - note.start);
+        const velocity = note.velocity/127;
+        const {column, color} = assign_column(note.pitch);
 
-const noteToSvgMap: Map<NoteData, SVGGraphicsElement> = new Map();
-
-
-/**
- * ノートデータに基づいてSVG要素を作成し、キャンバスに追加します。
- *
- * @param notes ノートデータの配列
- * @param svg SVGキャンバス要素
- */
-const renderCircles = (notes: NoteData[], svg: SVGGraphicsElement) => {
-    // 既存のノートを削除
-    noteToSvgMap.forEach(circle => circle.remove());
-    noteToSvgMap.clear();
-
-    notes.forEach(note => {
-        if (note.user_played) {
-            // ノートに基づいてSVG要素を作成
-            const color = getNoteColor(note.pitch);
+        const startTime = Tone.now() + 1
+        if (note.user_played === "True") {
+            // ユーザーが再生する音符の場合の処理をここに追加できます
             const circle = createSvgElement(svg.namespaceURI, "circle", {
                 r: `${Note.RADIUS}`,
-                cx: `${20 + (note.pitch % 10) * 10}%`, // サンプルの位置（カスタマイズする必要があります）
-                cy: "0", // 初期位置（画面外）
+                cx: `${20 + column * 20}%`,
+                cy: `${Note.RADIUS}`,
                 style: `fill: ${color}`,
-                class: "note",
-            }) as SVGGraphicsElement;
-
+                class: "shadow",
+            }) as SVGGraphicsElement;;
+    
             svg.appendChild(circle);
-            noteToSvgMap.set(note, circle); // ノートとSVG要素をマップに追加
+            activeCircles.add(circle);
 
-            // ノートのアニメーションを開始
-            animateCircle(circle, note.start, note.end);
-        }
-    });
-};
-
-/**
- * SVG要素のアニメーションを開始します。
- *
- * @param circle SVG要素
- * @param start ノートの開始時間
- * @param end ノートの終了時間
- */
-const animateCircle = (circle: SVGGraphicsElement, start: number, end: number) => {
-    const canvasHeight = Viewport.CANVAS_HEIGHT;
-    const duration = end - start;
-
-    // アニメーションの初期位置を設定
-    circle.setAttribute("cy", "0");
-
-    // Tone.Transportを使用してアニメーションのタイミングを同期
-    Tone.Transport.schedule(time => {
-        const animation = circle.animate(
-            [
-                { transform: `translateY(0)` },
-                { transform: `translateY(${canvasHeight}px)` }
-            ],
-            {
-                duration: duration * 1000, // 秒からミリ秒に変換
+    
+            // CSS アニメーションを使用して円を移動させる
+            const animation = circle.animate([
+                { transform: `translateY(${Note.RADIUS}px)` },
+                { transform: `translateY(${Viewport.CANVAS_HEIGHT - Note.RADIUS}px)` }
+            ], {
+                duration: (duration + 1.5) * 1000, // 秒をミリ秒に変換
                 fill: "forwards",
                 easing: "linear",
-            }
-        );
-        
-        animation.onfinish = () => {
-            circle.remove(); // アニメーション終了後に要素を削除
-            noteToSvgMap.delete(Array.from(noteToSvgMap.keys()).find(note => noteToSvgMap.get(note) === circle)!); // ノートと要素のマッピングを削除
-        };
-    }, start);
-};
+            });
+    
+            // アニメーション終了後に要素を削除
+            animation.finished.then(() => {
+                circle.remove();
+                activeCircles.delete(circle);
+                console.log(`Removed circle with pitch ${note.pitch}`);
+            });
+        }
+
+
+
+        // 音を再生する
+        instrument.triggerAttackRelease(frequency, duration, startTime, velocity);
+    });
+}
+
 
 /**
- * Maps pitch values to colors for circle visualization.
- *
- * @param pitch The pitch value
- * @returns The color for the circle
+ * ノートのピッチに基づいて、円の列と色を返します。
+ * 
+ * @param pitch ノートのピッチ
+ * @returns 列と色のオブジェクト
  */
-const getNoteColor = (pitch: number): { color: string; cx: string } => {
-    // Define colors based on pitch (customize as needed)
-    switch (pitch) {
-        case 67: return { color: 'green', cx: '20%' };
-        case 59: return { color: 'red', cx: '40%' };
-        case 62: return { color: 'blue', cx: '60%' };
-        case 35: return { color: 'yellow', cx: '80%' };
-        default: return { color: 'grey', cx: '0%' };
+const assign_column = (pitch: number): { column: number; color: string } => {
+    if (pitch >= 59 && pitch <= 61) {
+        return { column: 0, color: 'green' }
+    } else if (pitch >= 62 && pitch <= 64) {
+        return { column: 1, color: 'red' }; 
+    } else if (pitch >= 65 && pitch <= 66) {
+        return { column: 2, color: 'blue' }; 
+    } else if (pitch >= 67 && pitch <= 71) {
+        return { column: 3, color: 'yellow' }; 
+    } else {
+        return { column: 4, color: 'grey' }; // デフォルト値
     }
 };
 
-//second commit
+/**
+ * 円をアニメーションさせ、指定した時間にスクリーンの下まで移動させます。
+ * 
+ * @param circle SVGの円要素
+ * @param start ノートの開始時刻
+ * @param end ノートの終了時刻
+ */
+const animatedCircle = (circle: SVGGraphicsElement, start: number, end: number) => {
+    const canvasHeight = Viewport.CANVAS_HEIGHT;
+    const duration = end - start + 1;
+
+    return new Observable<void>(observer => {
+        const startTime = performance.now();
+        const animate = (time: number) => {
+            const elapsed = (time - startTime) / 1000; // 経過時間を秒で計算
+            const progress = Math.min(elapsed / duration, 1); // 経過時間をアニメーションの長さで割って進行度を計算
+            const y = canvasHeight * progress;
+
+            circle.setAttribute('transform', `translate(0, ${y})`);
+
+            if (y >= canvasHeight) {
+                circle.remove();
+                console.log(`Circle removed at y=${y}`);
+                observer.complete();
+                return;
+            }
+
+            if (progress < 1) {
+                requestAnimationFrame(animate);
+            } else {
+                circle.remove();
+                observer.next();
+                observer.complete();
+            }
+        };
+
+        requestAnimationFrame(animate);
+    });
+};
