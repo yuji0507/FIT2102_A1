@@ -14,7 +14,7 @@
 
 import "./style.css";
 
-import { fromEvent, interval, merge, of, mergeMap, delay, Observable, from, tap, takeUntil, combineLatest } from "rxjs";
+import { fromEvent, interval, merge, of, mergeMap, delay, Observable, from, tap, takeUntil, combineLatest, toArray } from "rxjs";
 import { map, filter, scan } from "rxjs/operators";
 import * as Tone from "tone";
 import { SampleLibrary } from "./tonejs-instruments";
@@ -137,7 +137,7 @@ export function main(csvContents: string, samples: { [key: string]: Tone.Sampler
         key$.pipe(filter(({ code }) => code === keyCode));
 
     /** Determines the rate of time steps */
-    const tick$ = interval(Constants.TICK_RATE_MS);
+    const tick$ = interval(Constants.TICK_RATE_MS * 10);
 
     /**
      * Renders the current state to the canvas.
@@ -188,31 +188,31 @@ export function main(csvContents: string, samples: { [key: string]: Tone.Sampler
         svg.appendChild(yellowCircle);
     };
 
-    const notes$: Observable<NoteData> = parseCsvToObservables(csvContents).pipe(
-        mergeMap(notesArray => from(notesArray)) // 配列をフラット化して Observable<NoteData> に変換
+    const notes$: Observable<NoteData[]> = parseCsvToObservables(csvContents).pipe(
+        mergeMap(noteArrays => from(noteArrays)), // 二次元配列をフラット化
+        toArray()  // 一次元配列に変換
     );
+    
 
+    
+    
     const source$ = combineLatest([tick$, notes$]).pipe(
-        scan((state: State, [tick, note]) => {
-            // 各 tick でノートを動かす
+        scan((state: State, [tick, notes]: [number, NoteData[]]) => {
+            const updatedNotes = notes.map(note => ({
+                ...note,
+                position: (tick * 100)  // ノートの位置を更新
+            }));
+
             const updatedState = {
                 ...state,
-                notes: state.notes.map(n => {
-                    if (n === note) {
-                        return {
-                            ...n,
-                            position: n.position + (tick * 100),
-                        };
-                    }
-                    return n;
-                })
+                notes: updatedNotes
             };
             return updatedState;
         }, initialState)
     );
     
 
-    playNotes(notes$, samples, svg, initialState);
+    playNotes(source$, samples, svg, initialState);
 
 }
 
@@ -303,52 +303,50 @@ const parseCsvToObservables = (csvContents: string): Observable<NoteData[]> => {
     });
 };
 
-function playNotes(allNotes$: Observable<NoteData>, samples: { [key: string]: Tone.Sampler }, svg: SVGGraphicsElement, s: State) {
+function playNotes(source$: Observable<State>, samples: { [key: string]: Tone.Sampler }, svg: SVGGraphicsElement, s: State) {
     const activeCircles = new Set<SVGGraphicsElement>();  // 現在表示されているノートを管理するSet
+    source$.subscribe(console.log)
+    source$.subscribe(state => {
+        state.notes.forEach(note => {
+            const instrument = samples[note.instrument_name];
+            const frequency = Tone.Frequency(note.pitch, "midi").toFrequency();
+            const duration = (note.end - note.start);
+            const velocity = note.velocity / 127;
+            const { column, color } = assign_column(note.pitch);
 
-    allNotes$.pipe(
-        mergeMap(note =>
-            note.user_played ? of(note).pipe(delay(note.start * 1000)) : of(null)),
-        filter(note => note !== null)
-    ).subscribe(note => {
-        const instrument = samples[note.instrument_name];
-        const frequency = Tone.Frequency(note.pitch, "midi").toFrequency();
-        const duration = (note.end - note.start);
-        const velocity = note.velocity / 127;
-        const { column, color } = assign_column(note.pitch);
+            const startTime = Tone.now() + 1;
 
-        const startTime = Tone.now() + 1;
+            if (note.user_played === "True") {
+                // Find or create an SVG circle element for the note
+                let circle = Array.from(activeCircles).find(c => c.getAttribute("data-note-id") === String(note.pitch));
+                if (!circle) {
+                    circle = createSvgElement(svg.namespaceURI, "circle", {
+                        r: `${Note.RADIUS}`,
+                        cx: `${20 + column * 20}%`,
+                        cy: `${Note.RADIUS}`,
+                        style: `fill: ${color}`,
+                        class: "shadow",
+                        "data-note-id": String(note.pitch),
+                    }) as SVGGraphicsElement;
 
+                    svg.appendChild(circle);
+                    activeCircles.add(circle);
+                }
 
-        if (note.user_played === "True") {
-            const circle = createSvgElement(svg.namespaceURI, "circle", {
-                r: `${Note.RADIUS}`,
-                cx: `${20 + column * 20}%`,
-                cy: `${Note.RADIUS}`,
-                style: `fill: ${color}`,
-                class: "shadow",
-            }) as SVGGraphicsElement;
+                // Update the note position based on the tick
+                const newY = Note.RADIUS + note.position;
+                circle.setAttribute("cy", String(newY));
+                console.log("Current Y Position:", newY);
 
-            svg.appendChild(circle);
-            activeCircles.add(circle);
+                // Remove the circle when it reaches the bottom
+                if (newY >= Viewport.CANVAS_HEIGHT - Note.RADIUS) {
+                    removeNoteFromSVG(circle, activeCircles);
+                }
+            }
 
-            const intervalTime = 5;
-            const times = (duration + 1.5) * 1000 / intervalTime;
-
-            const move$ = interval(intervalTime).pipe(
-                takeUntil(interval(intervalTime).pipe(filter(value => value >= times - 1))),
-                scan((progress) => progress + 1 / times, 0),
-                map((progress) => progress * (Viewport.CANVAS_HEIGHT - 2 * Note.RADIUS))
-            );
-
-            move$.subscribe(newY => {
-                circle.setAttribute("cy", String(Note.RADIUS + newY));
-            }, null, () => {
-                removeNoteFromSVG(circle, activeCircles);
-            });
-        }
-
-        instrument.triggerAttackRelease(frequency, duration, startTime, velocity);
+            // Trigger the instrument sound
+            instrument.triggerAttackRelease(frequency, duration, startTime, velocity);
+        });
     });
 }
 
